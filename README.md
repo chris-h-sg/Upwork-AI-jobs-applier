@@ -1,6 +1,14 @@
 # UpworkScribe AI: Automated Jobs Application on Upwork
 
-**UpworkScribe AI is not just a tool; it's your partner in navigating the competitive world of freelancing, helping you secure more projects and grow your freelance career. 🚀**
+**UpworkScribe AI is your partner in navigating the competitive world of freelancing. It automates aspects of Upwork job searching and application generation to help you secure more projects and grow your freelance career. 🚀**
+
+This project has been updated to use the official Upwork API for fetching job postings, making it more robust and reliable than web scraping methods. This requires setting up Upwork API credentials.
+
+## Important Note on Current Status
+
+**Please be aware:** The job fetching mechanism (`UpworkJobScraper` in `src/scraper.py`) is currently configured to use **simulated API data** for demonstration and development purposes. This allows you to run the application and see its workflow without a live API connection.
+
+To connect to the live Upwork API and fetch real job postings, you **must** complete the OAuth 2.0 setup as described in the "Setting up Upwork API Access" section below and then modify `src/scraper.py` to use your actual API client configuration and tokens.
 
 ## The Challenge of Modern Freelancing
 
@@ -19,10 +27,10 @@ UpworkScribe AI simplifies the freelancing process by acting as your personal as
 
 ## Features
 
-### Jobs Scraping and Classification
+### Job Fetching and Classification (via Upwork API)
 
-- **Job Monitoring**: The system scans Upwork for new project listings of the freelancer provided job titles, ensuring freelancer stay up-to-date.
-- **Intelligent Job Scoring**: Each job receives a score based on various criteria such: match with freelancer experience & skills, budget, duration, client history and past projects on the platform,etc. Only jobs scoring 7/10 or higher proceed for further analysis.
+- **Job Monitoring**: The system fetches new project listings from Upwork via the official API, based on the freelancer's provided job titles, ensuring up-to-date opportunities.
+- **Intelligent Job Scoring**: Each job receives a score based on various criteria such as: match with freelancer experience & skills, budget, duration, client history, and past projects on the platform. Only jobs scoring 7/10 or higher proceed for further analysis.
 
 ### AI Cover Letter and Interview Script Generation
 
@@ -36,8 +44,8 @@ UpworkScribe AI simplifies the freelancing process by acting as your personal as
 ## How It Works
 
 1. **User Input**: The process starts with the user entering a job title.
-2. **Job Scraping**: The system scrapes Upwork for job listings that match the user-provided search queries, gathering relevant opportunities in real-time.
-3. **Job Scoring and Filtering**: Each job is scored by an AI agent, and only jobs with a score of 7/10 or higher are presented to the freelancer, filtering out lower-quality matches.
+2. **Job Fetching**: The system fetches job listings from Upwork via the official API that match the user-provided search queries, gathering relevant opportunities.
+3. **Job Scoring and Filtering**: Each job is scored by an AI agent, and only jobs with a score of 7/10 or higher are processed further, filtering out lower-quality matches.
 5. **Cover Letter and Interview Preparation**: For strong job matches, the system generates:
    - A personalized cover letter emphasizing the user’s qualifications and alignment with the job.
    - A custom interview preparation script including potential questions to prepare the user for discussions with potential clients.
@@ -55,7 +63,7 @@ This is the detailed flow of the system:
 
 -   **LangGraph & LangChain**: Frameworks used for building AI agents and interacting with LLMs (GPT-4o, Llama 3, Gemini).
 -   **LangSmith**: For monitoring the different LLM calls and AI agents' interactions.
--   **Playwright**: For scraping and crawling websites.
+-   **`python-upwork-oauth2`**: For interacting with the official Upwork API.
 
 ---
 
@@ -74,13 +82,40 @@ This is the detailed flow of the system:
 
    Create a `.env` file in the root directory of the project and add your API keys, see `.env.example` to know all the parameters you will need.
 
+### Setting up Upwork API Access
+
+This project uses the official Upwork API via the `python-upwork-oauth2` library to fetch job postings. Setting this up requires several steps:
+
+1.  **Obtain Initial API Credentials (`Client ID` and `Client Secret`):**
+    To begin, you need a `Client ID` and a `Client Secret` from Upwork. You can obtain these by registering your application and creating an API key on the Upwork developer portal: **[Link to Upwork Developer Portal - User to fill this in]**.
+
+2.  **Configure Environment Variables:**
+    Once you have your `Client ID` and `Client Secret`, create a `.env` file in the root directory by copying `.env.example`. Add your credentials to this `.env` file:
+    ```env
+    UPWORK_CLIENT_ID="your_client_id_here"
+    UPWORK_CLIENT_SECRET="your_client_secret_here"
+    ```
+
+3.  **OAuth 2.0 Authentication Flow (Crucial Step for Live Data):**
+    The `python-upwork-oauth2` library requires completing Upwork's OAuth 2.0 authentication flow. This process typically involves:
+    *   Redirecting a user (you) to an Upwork authorization URL.
+    *   Authorizing the application.
+    *   Upwork redirecting back to a specified `redirect_uri` with an authorization code.
+    *   Exchanging this code for an **access token** and a **refresh token**.
+
+    **Important:** The application's API client (`src/scraper.py`) currently contains a **placeholder** for the Upwork client initialization and token management. **You will need to consult the `python-upwork-oauth2` library documentation and examples to fully implement the OAuth setup, token acquisition, storage (e.g., in your `.env` file or a secure vault), and refresh logic to fetch live data.** This is a one-time setup to get your tokens, which then need to be made available to the application (e.g., via environment variables like `UPWORK_ACCESS_TOKEN`, `UPWORK_REFRESH_TOKEN`).
+
+    Ensure all required variables are correctly set in your `.env` file before attempting to run with a live API connection.
+
 ### Run Locally
 
 #### Prerequisites
 
 - Python 3.9+
-- Necessary Python libraries (listed in `requirements.txt`)
-- API keys for LLM models you want to use (OpenAI, Claude, Gemini, Groq,...)
+- Python 3.9+
+- Necessary Python libraries (listed in `requirements.txt`).
+- API keys for your chosen LLM provider(s) (e.g., OpenAI, Google, Groq) set in your `.env` file.
+- Upwork API `Client ID` and `Client Secret` (and eventually access/refresh tokens) set in your `.env` file for live data access (see "Setting up Upwork API Access").
 
 #### Running the Application
 
@@ -95,22 +130,21 @@ This is the detailed flow of the system:
 
    ```sh
    pip install -r requirements.txt
-   playwright install firefox
    ```
 
-3. **Start the workflow:**
+3. **Start the main automation workflow:**
 
    ```sh
    python main.py
    ```
+   This runs the full job processing and application generation workflow. It will use the job title configured inside `main.py` for fetching jobs (currently using simulated job data as per the "Important Note" above). Generated cover letters and other outputs are saved as configured.
 
-   The application will start scraping job listings, classifying them, generating cover letters, and saving the results. By default, all the generated cover letters will be saved in the `data/cover_letter.txt` file alongside a csv file including all the jobs details.
-
-4. **Test the Upwork jobs scraping tool** by running:
+4. **Test the Upwork jobs fetching script (standalone):**
 
    ```sh
    python scrape_upwork_jobs.py
    ```
+   This script specifically fetches jobs based on the query defined within it (currently using simulated job data) and saves them to `upwork_jobs_data.csv`. It's useful for testing the job fetching and data saving parts independently.
 
 ---
 
@@ -130,13 +164,14 @@ This is the detailed flow of the system:
    docker run -e OPENAI_API_KEY=YOUR_API_KEY_HERE -v ./data:/usr/src/app/data upwork-auto-jobs-applier-using-ai
    ```
 
-   The application will start scraping job listings, classifying them, generating cover letters, and saving the results. By default, all the generated cover letters will be saved in the `data/cover_letters.txt` file.
+   The application will start the main workflow (currently using simulated job data). Ensure your `.env` file is correctly populated with LLM API keys if you build the image with it or pass them as environment variables. Docker usage for live Upwork API data would require careful management of Upwork API tokens.
 
-2. **Test the Upwork jobs scraping tool** in Docker by running:
+2. **Test the Upwork jobs fetching script** in Docker:
 
    ```sh
    docker run -e OPENAI_API_KEY=YOUR_API_KEY_HERE -v ./data:/usr/src/app/data upwork-auto-jobs-applier-using-ai python scrape_upwork_jobs.py
    ```
+   This will run the standalone job fetching script (currently using simulated data) and save the output CSV to the bind-mounted `./data` directory.
 
 ---
 

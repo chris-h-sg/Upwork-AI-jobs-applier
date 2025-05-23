@@ -2,9 +2,8 @@ langgraph
 langchain-core
 langchain_google_genai
 langchain_openai
-playwright
 html2text
 pandas
 colorama
 python-dotenv
-bs4
+python-upwork-oauth2
