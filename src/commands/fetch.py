@@ -1,6 +1,6 @@
 import asyncio
 import csv
-from src.scraper import UpworkJobScraper # Assuming UpworkJobScraper is in src.scraper
+from src.scraper import UpworkJobScraper, UpworkConfigurationError, UpworkApiError
 
 # Copied from scrape_upwork_jobs.py
 def save_data_to_csv(jobs_data_list, filename):
@@ -45,27 +45,34 @@ def save_data_to_csv(jobs_data_list, filename):
     except Exception as e:
         print(f"An unexpected error occurred while saving data to CSV: {e}")
 
-async def fetch_and_save_jobs(search_query, num_jobs, output_csv_filename, run_in_simulated_mode=True):
-    # run_in_simulated_mode is True because Upwork client is not fully configured yet
-    # This parameter is noted but not directly used to control scraper's simulation mode in this version,
-    # as the scraper itself decides simulation based on self.client.
-    # It's kept for conceptual alignment with the prompt.
-    print(f"Fetching jobs for query: '{search_query}', count: {num_jobs}. Output to: {output_csv_filename}")
-    if run_in_simulated_mode:
-        # This message is informative; actual simulation is handled by UpworkJobScraper's internal state.
-        print("Attempting to run in SIMULATED Upwork API mode (actual mode depends on scraper client init).")
-
-    scraper = UpworkJobScraper() 
+async def fetch_and_save_jobs(search_query, num_jobs, output_csv_filename):
+    print(f"Attempting to fetch jobs for query: '{search_query}', count: {num_jobs}. Output will be saved to: {output_csv_filename}")
     
-    job_listings = await scraper.fetch_jobs_from_api(
-        search_query=search_query,
-        num_jobs=num_jobs
-    )
+    job_listings = [] # Initialize to ensure it's defined in case of early exit
+    try:
+        scraper = UpworkJobScraper() 
+        
+        job_listings = await scraper.fetch_jobs_from_api(
+            search_query=search_query,
+            num_jobs=num_jobs
+        )
 
-    if job_listings:
-        print(f"Fetched {len(job_listings)} job listings.")
-        save_data_to_csv(job_listings, output_csv_filename)
-    else:
-        print("No job listings fetched.")
-    
-    return output_csv_filename # Or return success status/count
+        if job_listings:
+            print(f"Successfully fetched {len(job_listings)} job listings.")
+            save_data_to_csv(job_listings, output_csv_filename)
+            return output_csv_filename # Indicate success by returning filename
+        else:
+            # This case means API call was successful but no jobs matched the query.
+            print("No job listings found matching your query. Nothing to save.")
+            return None # Indicate no data, but not an error
+
+    except UpworkConfigurationError as e:
+        print(f"Configuration Error: Could not initialize Upwork client. Please check your .env file for UPWORK_CLIENT_ID, UPWORK_CLIENT_SECRET, UPWORK_REDIRECT_URI and ensure you have completed the OAuth flow if prompted. Details: {e}")
+        return None # Indicate failure
+    except UpworkApiError as e:
+        print(f"API Error: Failed to fetch jobs from Upwork. Details: {e}")
+        return None # Indicate failure
+    except Exception as e:
+        import traceback
+        print(f"An unexpected error occurred during job fetching: {e}\n{traceback.format_exc()}")
+        return None # Indicate failure
