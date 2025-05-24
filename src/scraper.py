@@ -1,17 +1,10 @@
 import os
-import hashlib
-import re # Keep for now for process_job_info_data, might be removed later
-import asyncio
-import time # Added for checking token expiry
+import time
 
-import upwork # Official Upwork API library
+import upwork
 from upwork.routers import graphql
 
-from src.utils import ainvoke_llm # Keep if LLM is still used for description parsing
-from src.database import job_exists
-from src.structured_outputs import JobInformation, JobType, ClientInformation # Added JobType, ClientInformation
-from src.prompts import SCRAPER_PROMPT # Keep if LLM is still used for description parsing
-
+from src.structured_outputs import JobInformation
 
 class UpworkConfigurationError(Exception):
     """Custom exception for Upwork API configuration errors."""
@@ -29,133 +22,123 @@ class UpworkJobScraper:
     """
 
     def __init__(self):
+        self._initialize_credentials()
+        self._setup_client()
+
+    def _initialize_credentials(self):
+        """Initialize credentials from environment variables."""
         self.client_id = os.getenv("UPWORK_CLIENT_ID")
         self.client_secret = os.getenv("UPWORK_CLIENT_SECRET")
         self.redirect_uri = os.getenv("UPWORK_REDIRECT_URI")
         self.access_token = os.getenv("UPWORK_ACCESS_TOKEN")
         self.refresh_token = os.getenv("UPWORK_REFRESH_TOKEN")
-        expires_at_str = os.getenv("UPWORK_EXPIRES_AT")
-        
+        self.expires_at_str = os.getenv("UPWORK_EXPIRES_AT")
         self.client = None
-        self.config = None # Will hold the upwork.Config object
+        self.config = None
 
-        # Base config data for Upwork client
-        config_data = {
+    def _setup_client(self):
+        """Set up the Upwork client with existing tokens or initiate OAuth flow."""
+        config_data = self._get_base_config()
+        
+        if self._has_valid_tokens():
+            if not self._initialize_with_existing_tokens(config_data):
+                self._try_oauth_flow()
+        else:
+            self._try_oauth_flow()
+
+        if self.client is None:
+            raise UpworkConfigurationError(self._get_configuration_error_message())
+
+    def _get_base_config(self):
+        """Get base configuration for Upwork client."""
+        return {
             'client_id': self.client_id,
             'client_secret': self.client_secret,
             'redirect_uri': self.redirect_uri,
         }
 
-        # Try to initialize with existing tokens first
-        if self.access_token and self.refresh_token and expires_at_str:
-            try:
-                expires_at_timestamp = float(expires_at_str)
-                
-                if time.time() >= expires_at_timestamp - 300: # 300 seconds = 5 minutes buffer
-                    print("INFO: Existing token is expired or nearing expiry. The library will attempt to refresh it if needed.")
-                
-                config_data['token'] = {
-                    'access_token': self.access_token,
-                    'refresh_token': self.refresh_token,
-                    'token_type': 'Bearer', # Standard token type
-                    'expires_at': expires_at_timestamp,
-                }
-                self.config = upwork.Config(config_data)
-                self.client = upwork.Client(self.config)
-                
-                # Optional: Test the connection by fetching user info to validate tokens
-                # This part is synchronous and should ideally be handled in an async setup method
-                # or by ensuring __init__ is called in a context where blocking is acceptable.
-                try:
-                    response = graphql.Api(self.client).execute({'query': "query { user { nid } }"})
-                    print(f"Successfully initialized Upwork client with existing tokens for user: {response.get('data', {}).get('user', {}).get('nid')}")
-                except Exception as e: 
-                    print(f"WARNING: Failed to validate existing tokens (e.g., expired/revoked): {e}. Proceeding to OAuth flow.")
-                    self.client = None 
-                    self.config = None 
-                    config_data.pop('token', None) # Remove bad token for OAuth attempt
-                    # Fall through to OAuth flow attempt below
-                
-            except ValueError: # Handles error if UPWORK_EXPIRES_AT is not a valid float
-                print(f"ERROR: UPWORK_EXPIRES_AT value ('{expires_at_str}') is not a valid timestamp. Cannot use existing tokens.")
-                self.client = None; self.config = None; config_data.pop('token', None)
-            except Exception as e: # Catch other potential errors during upwork.Config/Client init
-                print(f"Error initializing Upwork client with existing tokens: {e}. Attempting OAuth flow.")
-                self.client = None; self.config = None; config_data.pop('token', None) 
-                # Fall through to OAuth flow attempt below
-        
-        # If client is not yet set (no tokens, or token init failed), try OAuth flow
-        if not self.client:
-            if self.client_id and self.client_secret and self.redirect_uri:
-                if not (self.access_token and self.refresh_token and expires_at_str): # Only print if tokens weren't there to begin with
-                    print("INFO: Existing tokens not found or invalid. Attempting OAuth flow.")
-                if not self._perform_oauth_flow(): 
-                    self.client = None # Ensure client is None if OAuth fails
-            else:
-                # This path is taken if essential initial credentials are missing
-                # The self.client will remain None here.
-                pass # The final check will handle raising the exception.
+    def _has_valid_tokens(self):
+        """Check if we have all required tokens."""
+        return all([self.access_token, self.refresh_token, self.expires_at_str])
 
-        if self.client is None:
-            error_message = (
-                "Upwork client could not be initialized. This can be due to several reasons:\n"
-                "1. Missing or incorrect UPWORK_CLIENT_ID, UPWORK_CLIENT_SECRET, or UPWORK_REDIRECT_URI in your .env file.\n"
-                "2. The OAuth 2.0 flow was not completed successfully (e.g., did not paste callback URL, or Upwork returned an error).\n"
-                "3. Existing tokens (UPWORK_ACCESS_TOKEN, UPWORK_REFRESH_TOKEN, UPWORK_EXPIRES_AT) in .env are invalid or expired, and the refresh/re-authentication attempt failed.\n"
-                "Please check your .env file, ensure you have a valid internet connection, "
-                "and be prepared to complete the OAuth flow when prompted (by copying URLs between your browser and the console)."
-            )
-            raise UpworkConfigurationError(error_message)
+    def _initialize_with_existing_tokens(self, config_data):
+        """Initialize client with existing tokens."""
+        try:
+            expires_at_timestamp = float(self.expires_at_str)
+            
+            if time.time() >= expires_at_timestamp - 300:  # 5 minutes buffer
+                print("INFO: Existing token is expired or nearing expiry. The library will attempt to refresh it if needed.")
+            
+            config_data['token'] = {
+                'access_token': self.access_token,
+                'refresh_token': self.refresh_token,
+                'token_type': 'Bearer',
+                'expires_at': expires_at_timestamp,
+            }
+            self.config = upwork.Config(config_data)
+            self.client = upwork.Client(self.config)
+            
+            return self._validate_client_connection()
+            
+        except (ValueError, Exception) as e:
+            print(f"Error initializing with existing tokens: {e}")
+            self._reset_client_state()
+            return False
+
+    def _validate_client_connection(self):
+        """Validate the client connection by making a test API call."""
+        try:
+            response = graphql.Api(self.client).execute({'query': "query { user { nid } }"})
+            if 'message' in response:
+                raise UpworkApiError(f"API returned error message: {response['message']}")
+            print(f"Successfully initialized Upwork client with existing tokens for user: {response.get('data', {}).get('user', {}).get('nid')}")
+            return True
+        except Exception as e:
+            print(f"WARNING: Failed to validate existing tokens: {e}")
+            self._reset_client_state()
+            return False
+
+    def _reset_client_state(self):
+        """Reset client and config state."""
+        self.client = None
+        self.config = None
+
+    def _try_oauth_flow(self):
+        """Attempt OAuth flow if credentials are available."""
+        if all([self.client_id, self.client_secret, self.redirect_uri]):
+            if not self._has_valid_tokens():
+                print("INFO: Existing tokens not found or invalid. Attempting OAuth flow.")
+            if not self._perform_oauth_flow():
+                self._reset_client_state()
+
+    def _get_configuration_error_message(self):
+        """Get detailed error message for configuration issues."""
+        return (
+            "Upwork client could not be initialized. This can be due to several reasons:\n"
+            "1. Missing or incorrect UPWORK_CLIENT_ID, UPWORK_CLIENT_SECRET, or UPWORK_REDIRECT_URI in your .env file.\n"
+            "2. The OAuth 2.0 flow was not completed successfully (e.g., did not paste callback URL, or Upwork returned an error).\n"
+            "3. Existing tokens (UPWORK_ACCESS_TOKEN, UPWORK_REFRESH_TOKEN, UPWORK_EXPIRES_AT) in .env are invalid or expired, and the refresh/re-authentication attempt failed.\n"
+            "Please check your .env file, ensure you have a valid internet connection, "
+            "and be prepared to complete the OAuth flow when prompted (by copying URLs between your browser and the console)."
+        )
 
     def _perform_oauth_flow(self):
-        """
-        Manages the OAuth 2.0 authorization code flow.
-        """
-        # This method assumes client_id, client_secret, and redirect_uri are already checked by __init__
-        # before calling it, or that it's fine to proceed if they are set on the instance.
+        """Perform OAuth 2.0 authorization flow."""
         try:
-            # Use a fresh config for the initial part of OAuth
-            current_config_data = {
-                'client_id': self.client_id,
-                'client_secret': self.client_secret,
-                'redirect_uri': self.redirect_uri,
-            }
-            # Important: Do not include any 'token' field here for the initial step
-            self.config = upwork.Config(current_config_data)
-            temp_client = upwork.Client(self.config) # This client is not yet authorized for protected resources
+            self.config = upwork.Config(self._get_base_config())
+            temp_client = upwork.Client(self.config)
             
-            authorization_url = temp_client.get_authorization_url() # state can be used for CSRF protection
+            authorization_url = temp_client.get_authorization_url()
+            self._print_oauth_instructions(authorization_url)
             
-            print("\n--- Upwork API OAuth Authorization Needed ---")
-            print("1. Open the following URL in your browser:")
-            print(f"   {authorization_url}")
-            print("2. Authorize the application.")
-            print("3. You will be redirected to a URL (your redirect_uri). Copy the FULL redirected URL from your browser's address bar.")
-            
-            callback_url_response = input("4. Paste the full callback URL here and press Enter: \n")
-
-            if not callback_url_response:
-                print("ERROR: No callback URL provided. OAuth flow aborted.")
+            callback_url = self._get_callback_url()
+            if not callback_url:
                 return False
 
             print("INFO: Authorization code obtained. Requesting access token...")
-            # The get_access_token method will update temp_client.config with the token
-            temp_client.get_access_token(callback_url_response) 
+            temp_client.get_access_token(callback_url)
             
-            self.config = temp_client.config # Store the updated config with tokens
-            self.client = temp_client        # This client is now authorized
-
-            print("\n--- OAuth Successful! ---")
-            print("Successfully obtained Upwork API tokens.")
-            print("IMPORTANT: Please save these tokens in your .env file for future sessions to avoid repeating this process:")
-            print(f"UPWORK_ACCESS_TOKEN=\"{self.config.token['access_token']}\"")
-            print(f"UPWORK_REFRESH_TOKEN=\"{self.config.token['refresh_token']}\"")
-            print(f"UPWORK_EXPIRES_AT=\"{self.config.token['expires_at']}\"") # This is a Unix timestamp
-            print("-----------------------------\n")
-            # Update instance variables with new tokens for current session
-            self.access_token = self.config.token['access_token']
-            self.refresh_token = self.config.token['refresh_token']
-            # Note: UPWORK_EXPIRES_AT is also available in self.config.token['expires_at']
+            self._update_client_with_tokens(temp_client)
             return True
 
         except Exception as e:
@@ -163,14 +146,63 @@ class UpworkJobScraper:
             print(f"An error occurred during the OAuth flow: {e}\n{traceback.format_exc()}")
             return False
 
-    async def fetch_jobs_from_api(self, search_query="AI agent Developer", num_jobs=10):
-        # If __init__ completed successfully, self.client should be initialized.
-        # If not, UpworkConfigurationError would have been raised.
-        # Therefore, we can assume self.client is valid here.
+    def _print_oauth_instructions(self, authorization_url):
+        """Print OAuth flow instructions."""
+        print("\n--- Upwork API OAuth Authorization Needed ---")
+        print("1. Open the following URL in your browser:")
+        print(f"   {authorization_url}")
+        print("2. Authorize the application.")
+        print("3. You will be redirected to a URL (your redirect_uri). Copy the FULL redirected URL from your browser's address bar.")
 
+    def _get_callback_url(self):
+        """Get callback URL from user input."""
+        callback_url = input("4. Paste the full callback URL here and press Enter: \n")
+        if not callback_url:
+            print("ERROR: No callback URL provided. OAuth flow aborted.")
+            return None
+        return callback_url
+
+    def _update_client_with_tokens(self, temp_client):
+        """Update client with new tokens and print instructions."""
+        self.config = temp_client.config
+        self.client = temp_client
+        self.access_token = self.config.token['access_token']
+        self.refresh_token = self.config.token['refresh_token']
+
+        print("\n--- OAuth Successful! ---")
+        print("Successfully obtained Upwork API tokens.")
+        print("IMPORTANT: Please save these tokens in your .env file for future sessions to avoid repeating this process:")
+        print(f"UPWORK_ACCESS_TOKEN=\"{self.access_token}\"")
+        print(f"UPWORK_REFRESH_TOKEN=\"{self.refresh_token}\"")
+        print(f"UPWORK_EXPIRES_AT=\"{self.config.token['expires_at']}\"")
+        print("-----------------------------\n")
+
+    async def fetch_jobs_from_api(self, search_query="AI agent Developer", num_jobs=10):
+        """Fetch jobs from Upwork API."""
         print(f"INFO: Attempting to fetch jobs using live Upwork API for query: '{search_query}', count: {num_jobs}")
         
-        query = {
+        try:
+            api_response = await self._execute_job_search_query(search_query, num_jobs)
+            self._handle_token_refresh()
+            self._check_api_errors(api_response)
+            
+            jobs = self._extract_jobs_from_response(api_response)
+            if not jobs:
+                return []
+
+            return self._process_jobs(jobs)
+
+        except Exception as e:
+            self._handle_api_error(e)
+
+    async def _execute_job_search_query(self, search_query, num_jobs):
+        """Execute the GraphQL query to search for jobs."""
+        query = self._build_job_search_query(search_query, num_jobs)
+        return graphql.Api(self.client).execute(query)
+
+    def _build_job_search_query(self, search_query, num_jobs):
+        """Build the GraphQL query for job search."""
+        return {
             'query': """
             query marketplaceJobPostingsSearch(
                 $marketPlaceJobFilter: MarketplaceJobPostingsSearchFilter,
@@ -187,16 +219,44 @@ class UpworkJobScraper:
                     node {
                         id
                         title
-                        createdDateTime
+                        publishedDateTime
                         description
                         durationLabel
-                        engagement 
+                        engagement
+                        job {
+                            contractTerms {
+                                contractType
+                            }
+                            activityStat {
+                                jobActivity {
+                                    lastClientActivity
+                                    invitesSent 
+                                    totalInvitedToInterview 
+                                    totalUnansweredInvites 
+                                }
+                            }
+                        }
+                        hourlyBudgetMin {
+                            currency
+                            displayValue
+                        }
+                        hourlyBudgetMax {
+                            currency
+                            displayValue
+                        }
+                        weeklyBudget {
+                            currency
+                            displayValue
+                        }
                         experienceLevel
                         category 
                         subcategory
-                        relevanceEncoded 
+                        totalApplicants
                         preferredFreelancerLocation 
                         preferredFreelancerLocationMandatory 
+                        skills {
+                            prettyName
+                        }
                         client {
                             companyName
                             totalPostedJobs
@@ -221,149 +281,99 @@ class UpworkJobScraper:
                 "sortAttributes": [
                     { "field": "RECENCY" }
                 ]
-                }
+            }
         }
-        try:
-            # Run synchronous SDK calls in a separate thread
-            api_response_raw = await asyncio.to_thread(graphql.Api(self.client).execute, query)
-            
-            # Check if tokens were refreshed and need updating in .env
-            if self.config and self.config.token: 
-                current_token_in_config = self.config.token
-                if self.access_token != current_token_in_config.get('access_token'):
-                    print("\n--- Upwork API Token Updated ---")
-                    print("Your API access token was refreshed during the operation.")
-                    print("Please update your .env file with the new token details for future sessions:")
-                    print(f"UPWORK_ACCESS_TOKEN=\"{current_token_in_config['access_token']}\"")
-                    if 'refresh_token' in current_token_in_config and self.refresh_token != current_token_in_config.get('refresh_token'):
-                         print(f"UPWORK_REFRESH_TOKEN=\"{current_token_in_config['refresh_token']}\"")
-                    print(f"UPWORK_EXPIRES_AT=\"{current_token_in_config['expires_at']}\"")
-                    print("--------------------------------\n")
-                    self.access_token = current_token_in_config.get('access_token')
-                    if 'refresh_token' in current_token_in_config:
-                        self.refresh_token = current_token_in_config.get('refresh_token')
-            
-            api_jobs_processed = api_response_raw.get("data", {}).get("marketplaceJobPostingsSearch", {}).get("edges", [])
-            if not api_jobs_processed:
-                print("INFO: Live API call successful, but no jobs found for the query.")
-                # If no jobs are found, it's not an error, just return an empty list.
-                return [] # Return empty list directly
-            else:
-                print(f"INFO: Successfully fetched {len(api_jobs_processed)} jobs from live API.")
 
-        except Exception as e:
-            import traceback
-            error_message = f"Upwork API Error: Failed to fetch jobs from Upwork API: {e}\n{traceback.format_exc()}"
-            print(error_message) # Log the error
-            raise UpworkApiError(error_message) # Raise custom error
+    def _handle_token_refresh(self):
+        """Handle token refresh if needed."""
+        if self.config and self.config.token:
+            current_token = self.config.token
+            if self.access_token != current_token.get('access_token'):
+                self._print_token_update_instructions(current_token)
+                self._update_tokens(current_token)
 
-        # If API call was successful and jobs were found, proceed to process them.
-        # This part is only reached if api_jobs_processed is not empty and no exception occurred.
+    def _print_token_update_instructions(self, current_token):
+        """Print instructions for updating tokens."""
+        print("\n--- Upwork API Token Updated ---")
+        print("Your API access token was refreshed during the operation.")
+        print("Please update your .env file with the new token details for future sessions:")
+        print(f"UPWORK_ACCESS_TOKEN=\"{current_token['access_token']}\"")
+        if 'refresh_token' in current_token and self.refresh_token != current_token.get('refresh_token'):
+            print(f"UPWORK_REFRESH_TOKEN=\"{current_token['refresh_token']}\"")
+        print(f"UPWORK_EXPIRES_AT=\"{current_token['expires_at']}\"")
+        print("--------------------------------\n")
+
+    def _update_tokens(self, current_token):
+        """Update tokens with new values."""
+        self.access_token = current_token.get('access_token')
+        if 'refresh_token' in current_token:
+            self.refresh_token = current_token.get('refresh_token')
+
+    def _check_api_errors(self, api_response):
+        """Check for API errors in the response."""
+        if 'errors' in api_response:
+            error_messages = [error.get('message', 'Unknown error') for error in api_response['errors']]
+            raise UpworkApiError(f"Upwork API returned errors: {', '.join(error_messages)}")
+
+    def _extract_jobs_from_response(self, api_response):
+        """Extract jobs from API response."""
+        jobs = api_response.get("data", {}).get("marketplaceJobPostingsSearch", {}).get("edges", [])
+        if not jobs:
+            print("INFO: Live API call successful, but no jobs found for the query.")
+            return []
+        print(f"INFO: Successfully fetched {len(jobs)} jobs from live API.")
+        return jobs
+
+    def _process_jobs(self, jobs):
+        """Process the list of jobs into JobInformation objects."""
         jobs_data_models = []
-        try: # This try-except is for processing the list of jobs (either real or simulated)
-            for api_job in api_jobs_processed:
+        try:
+            for api_job in jobs:
                 node = api_job.get("node", {})
                 print(node)
-                api_job_id = node.get("id")
-                if not api_job_id:
+                if not node.get("id"):
                     print("Skipping job with no ID.")
                     continue
 
-                hashed_job_id = hashlib.sha256(api_job_id.encode()).hexdigest()
-                
-                # Now using asyncio.to_thread to call the synchronous job_exists
-                if await asyncio.to_thread(job_exists, hashed_job_id):
-                    # print(f"INFO: Skipping already collected job: {api_job_id} (Hashed: {hashed_job_id[:10]}...)") # Verbose
-                    continue # Silently skip for cleaner logs during normal operation
-                
-                job_type_str = node.get("jobType", "").upper()
-                job_type_enum = JobType.NOT_SPECIFIED
-                if job_type_str == "HOURLY":
-                    job_type_enum = JobType.HOURLY
-                elif job_type_str == "FIXED_PRICE":
-                    job_type_enum = JobType.FIXED # Corrected from FIXED_PRICE to match Enum definition
-
-                payment_rate = None
-                budget = None
-                if job_type_enum == JobType.HOURLY and node.get("hourlyBudget"):
-                    hr_rate = node["hourlyBudget"]
-                    min_rate = hr_rate.get('min') # Keep as None if missing
-                    max_rate = hr_rate.get('max') # Keep as None if missing
-                    if min_rate is not None and max_rate is not None:
-                         payment_rate = f"${min_rate}-${max_rate}"
-                    elif max_rate is not None: 
-                         payment_rate = f"Up to ${max_rate}"
-                    elif min_rate is not None:
-                         payment_rate = f"From ${min_rate}"
-                    # If both are None, payment_rate remains None, which is fine.
-
-                elif job_type_enum == JobType.FIXED and node.get("amount"): # Corrected from FIXED_PRICE to match Enum definition
-                    amount_data = node["amount"]
-                    val = amount_data.get('value') # Keep as None if missing
-                    code = amount_data.get('currencyCode', '') # Default to empty string
-                    if val is not None:
-                        budget = f"${val} {code}".strip()
-
-
-                client_info_raw = node.get("client", {})
-                client_country_raw = client_info_raw.get("country", {})
-                
-                # The description from the API might be HTML or Markdown.
-                # If it's HTML and needs cleaning, or if specific details need LLM extraction,
-                # convert_html_to_markdown and ainvoke_llm would be used here.
-                # For now, assume description is usable as is or LLM parsing is out of scope for this direct mapping.
-                description_text = node.get("description", "")
-
-                job_info = JobInformation(
-                    job_id=hashed_job_id, # Store the hashed ID
-                    title=node.get("title"),
-                    description=description_text, 
-                    job_type=job_type_enum,
-                    budget=budget,
-                    payment_rate=payment_rate,
-                    skills=[skill.get("name") for skill in node.get("skills", {}).get("nodes", []) if skill.get("name")],
-                    category=node.get("categoryPage", {}).get("title"), # Adjusted based on example
-                    duration=node.get("duration"), # This might need parsing if not structured
-                    workload=node.get("workload"), # This might need parsing/mapping
-                    link=node.get("upworkJobUrl"), # Adjusted based on example
-                    client_information=ClientInformation(
-                        country=client_country_raw.get("name"), # Mapped to ClientInformation.country
-                        feedback_score=client_info_raw.get("publicFeedback"), # Mapped to ClientInformation.feedback_score
-                        jobs_posted=client_info_raw.get("totalJobsPosted"), # Mapped to ClientInformation.jobs_posted
-                    payment_verification_status=(str(client_info_raw.get("paymentVerificationStatus", "")).upper() == "VERIFIED")
-                    )
-                )
+                job_info = self._create_job_information(node)
                 jobs_data_models.append(job_info.model_dump())
 
         except Exception as e:
             import traceback
-            print(f"ERROR: Error processing jobs data (live or simulated): {e}\n{traceback.format_exc()}")
+            print(f"ERROR: Error processing jobs data: {e}\n{traceback.format_exc()}")
 
-        return self.process_job_info_data(jobs_data_models) # Pass the processed list of dicts
+        return jobs_data_models
 
-    def process_job_info_data(self, jobs_data):
-        """
-        Performs any final common formatting on the job data.
-        The regex for payment_rate previously here is now handled during the mapping
-        from API response if structured rates (min/max) are available.
-        This method is kept for any other potential common processing.
-        """
-        # Example: Ensure all descriptions are strings, even if None initially
-        for job in jobs_data:
-            if job.get("description") is None:
-                job["description"] = ""
-            # Any other common cleaning or formatting can go here.
-        return jobs_data
+    def _create_job_information(self, node):
+        """Create a JobInformation object from a job node."""
+        return JobInformation(
+            id=node.get("id"),
+            title=node.get("title"),
+            publishedDateTime=node.get("publishedDateTime"),
+            description=node.get("description", ""),
+            durationLabel=node.get("durationLabel"),
+            engagement=node.get("engagement"),
+            contractType=node.get("job", {}).get("contractTerms", {}).get("contractType"),
+            hourlyBudgetMin=node.get("hourlyBudgetMin", {}).get("displayValue") if node.get("hourlyBudgetMin") else None,
+            hourlyBudgetMax=node.get("hourlyBudgetMax", {}).get("displayValue") if node.get("hourlyBudgetMax") else None,
+            weeklyBudget=node.get("weeklyBudget", {}).get("displayValue") if node.get("weeklyBudget") else None,
+            experienceLevel=node.get("experienceLevel"),
+            category=node.get("category"),
+            subcategory=node.get("subcategory"),
+            totalApplicants=node.get("totalApplicants"),
+            preferredFreelancerLocation=node.get("preferredFreelancerLocation"),
+            preferredFreelancerLocationMandatory=node.get("preferredFreelancerLocationMandatory", False),
+            skills=[skill.get("prettyName") for skill in node.get("skills", []) if skill and skill.get("prettyName")],
+            clientCompanyName=node.get("client", {}).get("companyName"),
+            clientTotalPostedJobs=node.get("client", {}).get("totalPostedJobs"),
+            clientTotalReviews=node.get("client", {}).get("totalReviews"),
+            clientTotalFeedback=node.get("client", {}).get("totalFeedback"),
+            clientTotalSpent=node.get("client", {}).get("totalSpent", {}).get("displayValue") if node.get("client", {}).get("totalSpent") else None
+        )
 
-# Old methods have been removed by replacing the entire block of old methods
-# with the new fetch_jobs_from_api and the updated process_job_info_data.
-
-# Note: job_exists from src.database is a synchronous function.
-# It is now called from the async method fetch_jobs_from_api using `await asyncio.to_thread(job_exists, ...)`,
-# which runs it in a separate thread to avoid blocking the event loop.
-# `asyncio`, `time`, `urlparse`, `parse_qs` and `upwork` have been imported.
-# The `upwork.Config` is accessed via `upwork.Config`.
-# The synchronous calls like `self.client.auth.get_user_info()` in `__init__` and
-# `self.client.execute()` in `fetch_jobs_from_api` are handled appropriately for an asyncio context
-# by being wrapped with `asyncio.to_thread` in `fetch_jobs_from_api` or by accepting that `__init__`
-# might block if called from a sync context directly (which is typical for class instantiation).
+    def _handle_api_error(self, error):
+        """Handle API errors."""
+        import traceback
+        error_message = f"Upwork API Error: Failed to fetch jobs from Upwork API: {error}\n{traceback.format_exc()}"
+        print(error_message)
+        raise UpworkApiError(error_message)
