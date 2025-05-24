@@ -74,15 +74,15 @@ Ensure all required Upwork API related variables are correctly set in your `.env
 1. **Create and activate a virtual environment:**
 
    ```sh
-   python -m venv venv
+   python -m venv .venv
    ```
    *   On Unix-like systems (Linux, macOS):
        ```sh
-       source venv/bin/activate
+       source .venv/bin/activate
        ```
    *   On Windows:
        ```sh
-       venv\Scripts\activate
+       .venv\Scripts\activate
        ```
 
 2. **Install the required packages:**

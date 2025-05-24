@@ -3,10 +3,9 @@ import hashlib
 import re # Keep for now for process_job_info_data, might be removed later
 import asyncio
 import time # Added for checking token expiry
-from urllib.parse import urlparse, parse_qs # Added for OAuth callback parsing
 
 import upwork # Official Upwork API library
-# from upwork.config import Config # Config is accessed via upwork.Config
+from upwork.routers import graphql
 
 from src.utils import ainvoke_llm # Keep if LLM is still used for description parsing
 from src.database import job_exists
@@ -68,8 +67,8 @@ class UpworkJobScraper:
                 # This part is synchronous and should ideally be handled in an async setup method
                 # or by ensuring __init__ is called in a context where blocking is acceptable.
                 try:
-                    user_info = self.client.auth.get_user_info() # This is a synchronous call
-                    print(f"Successfully initialized Upwork client with existing tokens for user: {user_info.get('user', {}).get('id')}")
+                    response = graphql.Api(self.client).execute({'query': "query { user { nid } }"})
+                    print(f"Successfully initialized Upwork client with existing tokens for user: {response.get('data', {}).get('user', {}).get('nid')}")
                 except Exception as e: 
                     print(f"WARNING: Failed to validate existing tokens (e.g., expired/revoked): {e}. Proceeding to OAuth flow.")
                     self.client = None 
@@ -125,7 +124,7 @@ class UpworkJobScraper:
             self.config = upwork.Config(current_config_data)
             temp_client = upwork.Client(self.config) # This client is not yet authorized for protected resources
             
-            authorization_url, state = temp_client.get_authorization_url() # state can be used for CSRF protection
+            authorization_url = temp_client.get_authorization_url() # state can be used for CSRF protection
             
             print("\n--- Upwork API OAuth Authorization Needed ---")
             print("1. Open the following URL in your browser:")
@@ -139,18 +138,9 @@ class UpworkJobScraper:
                 print("ERROR: No callback URL provided. OAuth flow aborted.")
                 return False
 
-            parsed_url = urlparse(callback_url_response)
-            query_params = parse_qs(parsed_url.query)
-            authz_code = query_params.get('code', [None])[0]
-            # returned_state = query_params.get('state', [None])[0] # Optional: verify state if needed
-
-            if not authz_code:
-                print("ERROR: Authorization code not found in the callback URL. OAuth flow failed.")
-                return False
-
             print("INFO: Authorization code obtained. Requesting access token...")
             # The get_access_token method will update temp_client.config with the token
-            token_data = temp_client.get_access_token(authz_code) 
+            temp_client.get_access_token(callback_url_response) 
             
             self.config = temp_client.config # Store the updated config with tokens
             self.client = temp_client        # This client is now authorized
@@ -180,34 +170,62 @@ class UpworkJobScraper:
 
         print(f"INFO: Attempting to fetch jobs using live Upwork API for query: '{search_query}', count: {num_jobs}")
         
-        graphql_query = f"""
-        query {{
-          jobSearch(query: "{search_query}", first: {num_jobs}, sortBy: "recency") {{
-            nodes {{
-              id
-              title
-              description: descriptionV2
-              jobType
-              amount {{ currencyCode value }}
-              hourlyBudget {{ min max }}
-              skills {{ nodes {{ name }} }}
-              categoryPage {{ title }}
-              duration
-              workload
-              url: upworkJobUrl
-              client {{
-                country {{ name }}
-                publicFeedback
-                totalJobsPosted
-                paymentVerificationStatus
-              }}
-            }}
-          }}
-        }}
-        """
+        query = {
+            'query': """
+            query marketplaceJobPostingsSearch(
+                $marketPlaceJobFilter: MarketplaceJobPostingsSearchFilter,
+                $searchType: MarketplaceJobPostingSearchType,
+                $sortAttributes: [MarketplaceJobPostingSearchSortAttribute]
+                ) {
+                marketplaceJobPostingsSearch(
+                    marketPlaceJobFilter: $marketPlaceJobFilter,
+                    searchType: $searchType,
+                    sortAttributes: $sortAttributes
+                ) {
+                    totalCount
+                    edges {
+                    node {
+                        id
+                        title
+                        createdDateTime
+                        description
+                        durationLabel
+                        engagement 
+                        experienceLevel
+                        category 
+                        subcategory
+                        relevanceEncoded 
+                        preferredFreelancerLocation 
+                        preferredFreelancerLocationMandatory 
+                        client {
+                            companyName
+                            totalPostedJobs
+                            totalReviews
+                            totalFeedback
+                            totalSpent {
+                                currency
+                                displayValue
+                            }
+                        }
+                    }
+                    }
+                }
+                }
+            """,
+            'variables': {
+                "marketPlaceJobFilter": {
+                    "titleExpression_eq": search_query,
+                    "pagination_eq": { 'first': num_jobs, 'after': "0" }
+                },
+                "searchType": "JOBS_FEED",
+                "sortAttributes": [
+                    { "field": "RECENCY" }
+                ]
+                }
+        }
         try:
             # Run synchronous SDK calls in a separate thread
-            api_response_raw = await asyncio.to_thread(self.client.execute, {'query': graphql_query})
+            api_response_raw = await asyncio.to_thread(graphql.Api(self.client).execute, query)
             
             # Check if tokens were refreshed and need updating in .env
             if self.config and self.config.token: 
@@ -225,7 +243,7 @@ class UpworkJobScraper:
                     if 'refresh_token' in current_token_in_config:
                         self.refresh_token = current_token_in_config.get('refresh_token')
             
-            api_jobs_processed = api_response_raw.get("data", {}).get("jobSearch", {}).get("nodes", [])
+            api_jobs_processed = api_response_raw.get("data", {}).get("marketplaceJobPostingsSearch", {}).get("edges", [])
             if not api_jobs_processed:
                 print("INFO: Live API call successful, but no jobs found for the query.")
                 # If no jobs are found, it's not an error, just return an empty list.
@@ -244,7 +262,9 @@ class UpworkJobScraper:
         jobs_data_models = []
         try: # This try-except is for processing the list of jobs (either real or simulated)
             for api_job in api_jobs_processed:
-                api_job_id = api_job.get("id")
+                node = api_job.get("node", {})
+                print(node)
+                api_job_id = node.get("id")
                 if not api_job_id:
                     print("Skipping job with no ID.")
                     continue
@@ -256,7 +276,7 @@ class UpworkJobScraper:
                     # print(f"INFO: Skipping already collected job: {api_job_id} (Hashed: {hashed_job_id[:10]}...)") # Verbose
                     continue # Silently skip for cleaner logs during normal operation
                 
-                job_type_str = api_job.get("jobType", "").upper()
+                job_type_str = node.get("jobType", "").upper()
                 job_type_enum = JobType.NOT_SPECIFIED
                 if job_type_str == "HOURLY":
                     job_type_enum = JobType.HOURLY
@@ -265,8 +285,8 @@ class UpworkJobScraper:
 
                 payment_rate = None
                 budget = None
-                if job_type_enum == JobType.HOURLY and api_job.get("hourlyBudget"):
-                    hr_rate = api_job["hourlyBudget"]
+                if job_type_enum == JobType.HOURLY and node.get("hourlyBudget"):
+                    hr_rate = node["hourlyBudget"]
                     min_rate = hr_rate.get('min') # Keep as None if missing
                     max_rate = hr_rate.get('max') # Keep as None if missing
                     if min_rate is not None and max_rate is not None:
@@ -277,35 +297,35 @@ class UpworkJobScraper:
                          payment_rate = f"From ${min_rate}"
                     # If both are None, payment_rate remains None, which is fine.
 
-                elif job_type_enum == JobType.FIXED and api_job.get("amount"): # Corrected from FIXED_PRICE to match Enum definition
-                    amount_data = api_job["amount"]
+                elif job_type_enum == JobType.FIXED and node.get("amount"): # Corrected from FIXED_PRICE to match Enum definition
+                    amount_data = node["amount"]
                     val = amount_data.get('value') # Keep as None if missing
                     code = amount_data.get('currencyCode', '') # Default to empty string
                     if val is not None:
                         budget = f"${val} {code}".strip()
 
 
-                client_info_raw = api_job.get("client", {})
+                client_info_raw = node.get("client", {})
                 client_country_raw = client_info_raw.get("country", {})
                 
                 # The description from the API might be HTML or Markdown.
                 # If it's HTML and needs cleaning, or if specific details need LLM extraction,
                 # convert_html_to_markdown and ainvoke_llm would be used here.
                 # For now, assume description is usable as is or LLM parsing is out of scope for this direct mapping.
-                description_text = api_job.get("description", "")
+                description_text = node.get("description", "")
 
                 job_info = JobInformation(
                     job_id=hashed_job_id, # Store the hashed ID
-                    title=api_job.get("title"),
+                    title=node.get("title"),
                     description=description_text, 
                     job_type=job_type_enum,
                     budget=budget,
                     payment_rate=payment_rate,
-                    skills=[skill.get("name") for skill in api_job.get("skills", {}).get("nodes", []) if skill.get("name")],
-                    category=api_job.get("categoryPage", {}).get("title"), # Adjusted based on example
-                    duration=api_job.get("duration"), # This might need parsing if not structured
-                    workload=api_job.get("workload"), # This might need parsing/mapping
-                    link=api_job.get("upworkJobUrl"), # Adjusted based on example
+                    skills=[skill.get("name") for skill in node.get("skills", {}).get("nodes", []) if skill.get("name")],
+                    category=node.get("categoryPage", {}).get("title"), # Adjusted based on example
+                    duration=node.get("duration"), # This might need parsing if not structured
+                    workload=node.get("workload"), # This might need parsing/mapping
+                    link=node.get("upworkJobUrl"), # Adjusted based on example
                     client_information=ClientInformation(
                         country=client_country_raw.get("name"), # Mapped to ClientInformation.country
                         feedback_score=client_info_raw.get("publicFeedback"), # Mapped to ClientInformation.feedback_score

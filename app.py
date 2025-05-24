@@ -10,8 +10,8 @@ def handle_fetch_jobs(args):
     print(f"Subcommand: fetch_jobs")
     # print(f"Output CSV: {args.output_csv}") # Original print, can be kept or removed
     # For now, use a default search query and num_jobs. These could be made CLI args later.
-    default_search_query = "AI agent developer"
-    default_num_jobs = 10 
+    default_search_query = "developer"
+    default_num_jobs = 1 
     asyncio.run(fetch_and_save_jobs(
         search_query=default_search_query,
         num_jobs=default_num_jobs,
