@@ -1,6 +1,6 @@
 import re
 import random
-import html2text
+# import html2text # Removed as it's no longer used after switching to API
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 
@@ -89,49 +89,9 @@ async def ainvoke_llm(
     output = await llm.ainvoke(messages)
     return output
 
-async def get_playwright_browser_context(browser):
-    """
-    Creates a new Playwright browser context with a random user agent.
-
-    Args:
-        browser: The Playwright browser instance.
-
-    Returns:
-        BrowserContext: A new browser context with a random user agent.
-    """
-    USER_AGENTS = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Mobile/15E148 Safari/604.1",
-        "Mozilla/5.0 (Android 11; Mobile; rv:109.0) Gecko/109.0 Firefox/109.0"
-    ]
-
-    # Select a random user agent for the browser context
-    user_agent = random.choice(USER_AGENTS)
-    
-    browser_context = await browser.new_context(user_agent=user_agent)
-    return browser_context
-
-def convert_html_to_markdown(html_content):
-    """
-    Convert HTML content to markdown format.
-
-    Args:
-        html_content (str): The HTML content to be converted.
-
-    Returns:
-        str: The converted markdown content.
-    """
-    h = html2text.HTML2Text()
-    h.ignore_links = False
-    h.ignore_images = True
-    h.ignore_tables = False
-    markdown_content = h.handle(str(html_content))
-
-    # Remove excessive newlines
-    markdown_content = re.sub(r"\n{3,}", "\n\n", markdown_content)
-    return markdown_content.strip()
+# Removed get_playwright_browser_context as Playwright is no longer used.
+# Removed convert_html_to_markdown as html2text is no longer a dependency
+# and HTML processing is not currently done by the scraper.
 
 def format_scraped_job_for_scoring(jobs):
     """
